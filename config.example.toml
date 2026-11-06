@@ -1,0 +1,24 @@
+[proxy]
+listen_host = "127.0.0.1"
+listen_port = 8080
+confdir = ""
+
+[storage]
+db_path = "data/token_logger.db"
+max_queue = 1000
+batch_size = 50
+flush_interval_sec = 0.5
+
+[fluentbit]
+enabled = false
+host = "127.0.0.1"
+port = 24225
+tag = "token_logger.calls"
+format = "json"
+max_queue = 1000
+
+[logging]
+client_name = ""
+redact_secrets = true
+max_body_bytes = 2000000
+hosts = ["api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "openrouter.ai", "api.deepseek.com", "api.x.ai", "api.mistral.ai", "api.groq.com"]

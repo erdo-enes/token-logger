@@ -1,0 +1,28 @@
+[Unit]
+Description=Token Logger LLM proxy
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=token-logger
+Group=token-logger
+WorkingDirectory=/opt/token-logger
+ExecStart=/opt/token-logger/.venv/bin/python -m token_logger.main /opt/token-logger/config.toml
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/token-logger
+Environment="TOKEN_LOGGER_DB=/var/lib/token-logger/token_logger.db"
+Environment="PYTHONUNBUFFERED=1"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
