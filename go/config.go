@@ -33,7 +33,23 @@ func DefaultConfig() *Config {
 		FBPort:         24225,
 		FBTag:          "token_logger.calls",
 		FBFormat:       "json",
-		Hosts:          []string{"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "openrouter.ai", "api.deepseek.com", "api.x.ai", "api.mistral.ai", "api.groq.com"},
+		Hosts: []string{
+			"api.anthropic.com",
+			"claude.ai",
+			"api.openai.com",
+			"chatgpt.com",
+			"generativelanguage.googleapis.com",
+			"cloudcode-pa.googleapis.com",
+			"daily-cloudcode-pa.googleapis.com",
+			"autopush-cloudcode-pa.googleapis.com",
+			"api.githubcopilot.com",
+			"copilot-proxy.githubusercontent.com",
+			"openrouter.ai",
+			"api.deepseek.com",
+			"api.x.ai",
+			"api.mistral.ai",
+			"api.groq.com",
+		},
 	}
 }
 

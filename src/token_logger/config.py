@@ -19,7 +19,10 @@ class Config:
     redact_secrets: bool = True
     max_body_bytes: int = 2_000_000
     hosts: list[str] = field(default_factory=lambda: [
-        "api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com",
+        "api.anthropic.com", "claude.ai", "api.openai.com", "chatgpt.com",
+        "generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com",
+        "daily-cloudcode-pa.googleapis.com", "autopush-cloudcode-pa.googleapis.com",
+        "api.githubcopilot.com", "copilot-proxy.githubusercontent.com",
         "openrouter.ai", "api.deepseek.com", "api.x.ai", "api.mistral.ai", "api.groq.com",
     ])
     fb_enabled: bool = False

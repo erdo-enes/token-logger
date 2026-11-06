@@ -22,5 +22,18 @@ def test_openai_sse():
 def test_is_llm():
     hosts = ["api.openai.com"]
     assert is_llm("api.openai.com", "/v1/chat/completions", hosts)
+    assert is_llm("chatgpt.com", "/backend-api/codex/responses", [])
     assert not is_llm("example.com", "/other", hosts)
     assert is_llm("example.com", "/v1/chat/completions", [])
+
+
+def test_gemini_subscription_usage():
+    parsed = {"response": {"modelVersion": "gemini-4-argon", "usageMetadata": {
+        "promptTokenCount": 6939, "candidatesTokenCount": 6, "cachedContentTokenCount": 80, "totalTokenCount": 6945
+    }}}
+    usage = extract_usage(parsed)
+    assert usage["prompt_tokens"] == 6939
+    assert usage["completion_tokens"] == 6
+    assert usage["cache_read_tokens"] == 80
+    assert usage["total_tokens"] == 6945
+    assert extract_model(parsed) == "gemini-4-argon"

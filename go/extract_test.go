@@ -24,11 +24,21 @@ func TestIsLLMAndRedact(t *testing.T) {
 	if !IsLLM("api.openai.com", "/v1/chat/completions", []string{"api.openai.com"}) {
 		t.Fatal("should be llm")
 	}
+	if !IsLLM("chatgpt.com", "/backend-api/codex/responses", nil) {
+		t.Fatal("codex subscription path should be llm")
+	}
 	if IsLLM("example.com", "/other", []string{"api.openai.com"}) {
 		t.Fatal("should not be llm")
 	}
-	if Redact("key sk-abcdefgh12345678") != "key [REDACTED]" {
+	if Redact("key sk-abcdefgh12345678 ghu_1234567890 ya29.a0AfH6SMBx") != "key [REDACTED] [REDACTED] [REDACTED]" {
 		t.Fatal("redact failed")
+	}
+}
+
+func TestParseGeminiSubscription(t *testing.T) {
+	p := ParseBody([]byte(`{"response":{"modelVersion":"gemini-4-argon","usageMetadata":{"promptTokenCount":6939,"candidatesTokenCount":6,"cachedContentTokenCount":80,"totalTokenCount":6945}}}`), "application/json")
+	if p.Model != "gemini-4-argon" || *p.Usage.Prompt != 6939 || *p.Usage.Completion != 6 || *p.Usage.CacheRead != 80 || *p.Usage.Total != 6945 {
+		t.Fatalf("bad gemini parse: %+v", p)
 	}
 }
 

@@ -60,6 +60,13 @@ class _Handler(BaseRequestHandler):
                 port = int(port_s or 443)
                 self._read_headers(rfile)
                 self.request.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                h_lower = host.lower()
+                should_intercept = h_lower in ("127.0.0.1", "localhost", "::1") or any(
+                    h_lower == a.lower() or h_lower.endswith("." + a.lower()) for a in self.config.hosts
+                )
+                if not should_intercept:
+                    self._tunnel_blind(host, port)
+                    return
                 context = self.ca.server_context(host)
                 tls_sock = context.wrap_socket(self.request, server_side=True)
                 self.request = tls_sock
@@ -73,6 +80,33 @@ class _Handler(BaseRequestHandler):
             if os.environ.get("TOKEN_LOGGER_DEBUG"):
                 traceback.print_exc()
 
+    def _tunnel_blind(self, host: str, port: int) -> None:
+        import select
+        import socket
+        try:
+            up = socket.create_connection((host, port), timeout=15)
+        except OSError:
+            return
+        try:
+            sockets = [self.request, up]
+            while True:
+                r, _, _ = select.select(sockets, [], [], 60)
+                if not r:
+                    break
+                for s in r:
+                    data = s.recv(32768)
+                    if not data:
+                        return
+                    other = up if s is self.request else self.request
+                    other.sendall(data)
+        except OSError:
+            pass
+        finally:
+            try:
+                up.close()
+            except OSError:
+                pass
+
     def _split_target(self, target: str, rfile):
         headers = self._read_headers(rfile)
         self._pending_headers = headers
@@ -85,13 +119,17 @@ class _Handler(BaseRequestHandler):
 
     def _read_headers(self, rfile) -> dict:
         headers = {}
+        raw_headers = []
         while True:
             line = rfile.readline(65536)
             if not line or line in (b"\r\n", b"\n"):
                 break
             if b":" in line:
                 key, _, value = line.decode("iso-8859-1").partition(":")
-                headers[key.strip().lower()] = value.strip()
+                k_clean, v_clean = key.strip(), value.strip()
+                headers[k_clean.lower()] = v_clean
+                raw_headers.append((k_clean, v_clean))
+        self._raw_headers = raw_headers
         return headers
 
     def _serve_requests(self, rfile, default_host: str, default_port: int, tls: bool, first=None):
@@ -127,7 +165,8 @@ class _Handler(BaseRequestHandler):
                     pass
             is_tls_upstream = tls or port == 443
             parsed_req = parse_body(raw_body[: self.config.max_body_bytes],
-                                    headers.get("content-type", "")) if is_llm(host, path, self.config.hosts) else ""
+                                    headers.get("content-type", ""),
+                                    headers.get("content-encoding", "")) if is_llm(host, path, self.config.hosts) else ""
             close_after = headers.get("connection", "").lower() == "close" or headers.get("proxy-connection", "").lower() == "close"
             try:
                 resp, resp_headers, status, reason = self._forward(
@@ -165,7 +204,8 @@ class _Handler(BaseRequestHandler):
                 resp.close()
             if is_llm(host, path, self.config.hosts):
                 try:
-                    parsed_resp = parse_body(bytes(captured), resp_headers.get("content-type", ""))
+                    parsed_resp = parse_body(bytes(captured), resp_headers.get("content-type", ""),
+                                             resp_headers.get("content-encoding", ""))
                     usage = extract_usage(parsed_resp)
                     model = extract_model(parsed_resp, extract_model(parsed_req) if isinstance(parsed_req, dict) else "")
                     self.writer.put(CallRecord(
@@ -186,17 +226,26 @@ class _Handler(BaseRequestHandler):
                 return
 
     def _forward(self, method, path, body, headers, host, port, use_tls):
-        forward_headers = {k: v for k, v in headers.items()
-                           if k.lower() not in ("proxy-connection", "proxy-authorization", "connection",
-                                                "transfer-encoding", "host", "content-length", "expect")}
+        skip = ("proxy-connection", "proxy-authorization", "connection",
+                "transfer-encoding", "host", "content-length", "expect")
+        raw_list = getattr(self, "_raw_headers", None)
+        if raw_list is not None:
+            forward_headers = {k: v for k, v in raw_list if k.lower() not in skip}
+        else:
+            forward_headers = {k: v for k, v in headers.items() if k.lower() not in skip}
         if body:
             forward_headers["Content-Length"] = str(len(body))
+        has_host = any(k.lower() == "host" for k in forward_headers)
+        has_accept_enc = any(k.lower() == "accept-encoding" for k in forward_headers)
         if use_tls:
             context = ssl.create_default_context() if self.upstream_verify else ssl._create_unverified_context()
             conn = http.client.HTTPSConnection(host, port, timeout=300, context=context)
         else:
             conn = http.client.HTTPConnection(host, port, timeout=300)
-        conn.request(method, path, body=body or None, headers=forward_headers)
+        conn.putrequest(method, path, skip_host=has_host, skip_accept_encoding=has_accept_enc)
+        for k, v in forward_headers.items():
+            conn.putheader(k, v)
+        conn.endheaders(message_body=body or None)
         resp = conn.getresponse()
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
         return resp, resp_headers, resp.status, resp.reason

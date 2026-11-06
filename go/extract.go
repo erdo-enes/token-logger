@@ -25,24 +25,19 @@ var pricing = []struct {
 	{"claude-haiku", 0.80, 4.0},
 	{"gpt-5", 1.25, 10.0},
 	{"gpt-4o", 2.50, 10.0},
+	{"gemini-4-argon", 1.25, 5.0},
 	{"gemini", 1.25, 5.0},
 	{"deepseek", 0.27, 1.10},
 	{"llama", 0.20, 0.20},
 	{"mistral", 0.20, 0.60},
 }
 
-var secretRe = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{10,}`)
+var secretRe = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{10,}|gh[pousr]_[A-Za-z0-9_]{8,}|ya29\.[0-9A-Za-z_-]{10,}`)
 
 func Redact(s string) string { return secretRe.ReplaceAllString(s, "[REDACTED]") }
 
 func IsLLM(host, path string, hosts []string) bool {
-	host = strings.ToLower(host)
-	for _, h := range hosts {
-		if host == h || strings.HasSuffix(host, "."+h) {
-			return true
-		}
-	}
-	for _, seg := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1beta/models", ":generateContent", ":streamGenerateContent"} {
+	for _, seg := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1beta/models", ":generateContent", ":streamGenerateContent", ":generateChat", ":streamGenerateChat", ":internalAtomicAgenticChat", "/backend-api/codex", "/backend-api/conversation"} {
 		if strings.Contains(path, seg) {
 			return true
 		}
@@ -55,6 +50,9 @@ func DetectClient(ua, configured string) string {
 		return configured
 	}
 	lower := strings.ToLower(ua)
+	if strings.Contains(lower, "antigravity") || strings.Contains(lower, "agy") {
+		return "antigravity"
+	}
 	for _, name := range []string{"claude", "opencode", "codex", "cursor", "aider", "copilot", "gemini"} {
 		if strings.Contains(lower, name) {
 			return name
@@ -124,15 +122,29 @@ func applyUsage(m map[string]any, u *Usage) {
 		u.Prompt = v
 	} else if v := getInt(m, "usage", "prompt_tokens"); v != nil {
 		u.Prompt = v
+	} else if v := getInt(m, "usageMetadata", "promptTokenCount"); v != nil {
+		u.Prompt = v
+	} else if v := getInt(m, "response", "usageMetadata", "promptTokenCount"); v != nil {
+		u.Prompt = v
 	}
 	if v := getInt(m, "usage", "output_tokens"); v != nil {
 		u.Completion = v
 	} else if v := getInt(m, "usage", "completion_tokens"); v != nil {
 		u.Completion = v
+	} else if v := getInt(m, "usageMetadata", "candidatesTokenCount"); v != nil {
+		u.Completion = v
+	} else if v := getInt(m, "response", "usageMetadata", "candidatesTokenCount"); v != nil {
+		u.Completion = v
 	}
 	if v := getInt(m, "usage", "cache_read_input_tokens"); v != nil {
 		u.CacheRead = v
 	} else if v := getInt(m, "usage", "prompt_tokens_details", "cached_tokens"); v != nil {
+		u.CacheRead = v
+	} else if v := getInt(m, "usage", "input_tokens_details", "cached_tokens"); v != nil {
+		u.CacheRead = v
+	} else if v := getInt(m, "usageMetadata", "cachedContentTokenCount"); v != nil {
+		u.CacheRead = v
+	} else if v := getInt(m, "response", "usageMetadata", "cachedContentTokenCount"); v != nil {
 		u.CacheRead = v
 	}
 	if v := getInt(m, "usage", "cache_creation_input_tokens"); v != nil {
@@ -140,11 +152,21 @@ func applyUsage(m map[string]any, u *Usage) {
 	}
 	if v := getInt(m, "usage", "total_tokens"); v != nil {
 		u.Total = v
+	} else if v := getInt(m, "usageMetadata", "totalTokenCount"); v != nil {
+		u.Total = v
+	} else if v := getInt(m, "response", "usageMetadata", "totalTokenCount"); v != nil {
+		u.Total = v
 	}
 	if v := getInt(m, "response", "usage", "input_tokens"); v != nil {
 		u.Prompt = v
 	}
 	if v := getInt(m, "response", "usage", "output_tokens"); v != nil {
+		u.Completion = v
+	}
+	if v := getInt(m, "message", "usage", "input_tokens"); v != nil {
+		u.Prompt = v
+	}
+	if v := getInt(m, "message", "usage", "output_tokens"); v != nil {
 		u.Completion = v
 	}
 }
@@ -175,8 +197,14 @@ func ParseBody(data []byte, contentType string) Parsed {
 				out.Valid = true
 				if v := getStr(m, "model"); v != "" {
 					out.Model = v
+				} else if v := getStr(m, "modelVersion"); v != "" {
+					out.Model = v
 				}
 				if v := getStr(m, "response", "model"); v != "" {
+					out.Model = v
+				} else if v := getStr(m, "response", "modelVersion"); v != "" {
+					out.Model = v
+				} else if v := getStr(m, "message", "model"); v != "" {
 					out.Model = v
 				}
 				applyUsage(m, &out.Usage)
@@ -188,7 +216,13 @@ func ParseBody(data []byte, contentType string) Parsed {
 			out.Valid = true
 			out.Model = getStr(m, "model")
 			if out.Model == "" {
+				out.Model = getStr(m, "modelVersion")
+			}
+			if out.Model == "" {
 				out.Model = getStr(m, "response", "model")
+			}
+			if out.Model == "" {
+				out.Model = getStr(m, "response", "modelVersion")
 			}
 			applyUsage(m, &out.Usage)
 		}

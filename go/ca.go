@@ -46,7 +46,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "Token Logger CA"},
+		Subject:               pkix.Name{CommonName: "Local Root CA"},
 		NotBefore:             time.Now().Add(-24 * time.Hour),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
 		IsCA:                  true,
@@ -147,7 +147,7 @@ func (ca *CA) ServerTLSConfig(host string) (*tls.Config, error) {
 	cert := tls.Certificate{Certificate: [][]byte{der, ca.certDER}, PrivateKey: key}
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"http/1.1"},
+		NextProtos:   []string{"h2", "http/1.1"},
 		MinVersion:   tls.VersionTLS12,
 	}
 	ca.cache.Store(host, cfg)

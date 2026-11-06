@@ -37,7 +37,7 @@ class CertificateAuthority:
             self._ca_cert = self._x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
             return
         self._ca_key = self._ec.generate_private_key(self._ec.SECP256R1())
-        subject = issuer = self._x509.Name([self._x509.NameAttribute(self._NameOID.COMMON_NAME, "Token Logger CA")])
+        subject = issuer = self._x509.Name([self._x509.NameAttribute(self._NameOID.COMMON_NAME, "Local Root CA")])
         now = datetime.now(timezone.utc)
         self._ca_cert = (
             self._x509.CertificateBuilder()

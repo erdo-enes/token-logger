@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -92,14 +93,28 @@ func (c *captureReadCloser) Read(p []byte) (int, error) {
 
 type state struct {
 	start         time.Time
-	reqData       []byte
+	reqBuf        *cappedBuffer
 	reqCT         string
+	reqCE         string
 	userAgent     string
 	respBuf       *cappedBuffer
 	respCT        string
+	respCE        string
 	status        int
 	transportErr  string
 	contentLength int64
+}
+
+func decodeBody(data []byte, contentEncoding string) []byte {
+	if strings.EqualFold(strings.TrimSpace(contentEncoding), "gzip") && len(data) > 0 {
+		if gr, err := gzip.NewReader(bytes.NewReader(data)); err == nil {
+			defer gr.Close()
+			if decoded, err := io.ReadAll(gr); err == nil {
+				return decoded
+			}
+		}
+	}
+	return data
 }
 
 type ctxKey struct{}
@@ -120,12 +135,69 @@ func (w *statusWriter) Flush() {
 }
 
 type Proxy struct {
-	cfg    *Config
-	ca     *CA
-	writer *Writer
+	cfg       *Config
+	ca        *CA
+	writer    *Writer
+	transport *http.Transport
 }
 
-func NewProxy(cfg *Config, ca *CA, w *Writer) *Proxy { return &Proxy{cfg: cfg, ca: ca, writer: w} }
+func NewProxy(cfg *Config, ca *CA, w *Writer) *Proxy {
+	tr := &http.Transport{
+		Proxy:              nil,
+		DisableCompression: true,
+		ForceAttemptHTTP2:  true,
+		MaxIdleConns:       128,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:    90 * time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: !cfg.UpstreamVerify,
+			MinVersion:         tls.VersionTLS12,
+			NextProtos:         []string{"h2", "http/1.1"},
+		},
+	}
+	return &Proxy{cfg: cfg, ca: ca, writer: w, transport: tr}
+}
+
+func (p *Proxy) shouldInterceptHost(host string) bool {
+	h := strings.ToLower(host)
+	if sh, _, err := net.SplitHostPort(h); err == nil {
+		h = sh
+	}
+	if h == "127.0.0.1" || h == "localhost" || h == "::1" {
+		return true
+	}
+	for _, allowed := range p.cfg.Hosts {
+		a := strings.ToLower(allowed)
+		if h == a || strings.HasSuffix(h, "."+a) {
+			return true
+		}
+	}
+	return false
+}
+
+func tunnelBlindTCP(client net.Conn, target string) {
+	defer client.Close()
+	if !strings.Contains(target, ":") {
+		target += ":443"
+	}
+	up, err := net.DialTimeout("tcp", target, 15*time.Second)
+	if err != nil {
+		return
+	}
+	defer up.Close()
+	_ = client.SetDeadline(time.Time{})
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(up, client)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, up)
+		done <- struct{}{}
+	}()
+	<-done
+}
 
 func (p *Proxy) Serve() error {
 	ln, err := net.Listen("tcp", p.cfg.Addr)
@@ -168,6 +240,10 @@ func (p *Proxy) handle(conn net.Conn) {
 			conn.Close()
 			return
 		}
+		if !p.shouldInterceptHost(host) {
+			tunnelBlindTCP(&bufferedConn{Conn: conn, r: br}, target)
+			return
+		}
 		tlsCfg, err := p.ca.ServerTLSConfig(host)
 		if err != nil {
 			debugf("tlsconfig: %v", err)
@@ -181,7 +257,7 @@ func (p *Proxy) handle(conn net.Conn) {
 			return
 		}
 		_ = tlsConn.SetDeadline(time.Time{})
-		p.serveOne(tlsConn, "https", target)
+		p.serveConn(tlsConn, "https", target)
 		tlsConn.Close()
 		return
 	}
@@ -194,57 +270,67 @@ func (p *Proxy) handle(conn net.Conn) {
 	if host == "" {
 		host = req.Host
 	}
-	p.serveOne(&bufferedConn{Conn: conn, r: br}, scheme, host)
+	p.serveConn(&bufferedConn{Conn: conn, r: br}, scheme, host)
 	conn.Close()
 }
 
-func (p *Proxy) serveOne(conn net.Conn, scheme, target string) {
-	st := &state{start: time.Now(), respBuf: &cappedBuffer{max: p.cfg.MaxBody}}
-	ctx := context.WithValue(context.Background(), ctxKey{}, st)
+func (p *Proxy) serveConn(conn net.Conn, scheme, target string) {
 	rp := &httputil.ReverseProxy{
 		FlushInterval: -1,
-		Director: func(r *http.Request) {
-			data, _ := io.ReadAll(r.Body)
-			r.Body.Close()
-			st.reqData = data
-			st.reqCT = r.Header.Get("Content-Type")
-			st.userAgent = r.Header.Get("User-Agent")
-			r.Body = io.NopCloser(bytes.NewReader(data))
-			r.ContentLength = int64(len(data))
-			if r.URL.Host != "" {
-				if r.URL.Scheme == "" {
-					r.URL.Scheme = scheme
+		Transport:     p.transport,
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			st, _ := pr.In.Context().Value(ctxKey{}).(*state)
+			rc := &captureReadCloser{ReadCloser: pr.In.Body, buf: &cappedBuffer{max: p.cfg.MaxBody}}
+			st.reqBuf = rc.buf
+			st.reqCT = pr.In.Header.Get("Content-Type")
+			st.reqCE = pr.In.Header.Get("Content-Encoding")
+			st.userAgent = pr.In.Header.Get("User-Agent")
+			pr.Out.Body = rc
+			pr.Out.ContentLength = pr.In.ContentLength
+			if pr.Out.URL.Host != "" {
+				if pr.Out.URL.Scheme == "" {
+					pr.Out.URL.Scheme = scheme
 				}
 			} else {
-				r.URL.Scheme = scheme
-				r.URL.Host = target
+				pr.Out.URL.Scheme = scheme
+				pr.Out.URL.Host = target
 			}
-			r.Host = r.URL.Host
-			r.RequestURI = ""
-		},
-		Transport: &http.Transport{
-			Proxy:           nil,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: !p.cfg.UpstreamVerify, MinVersion: tls.VersionTLS12},
+			pr.Out.Host = pr.Out.URL.Host
+			pr.Out.RequestURI = ""
+			// Ensure no proxy headers (X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Proto, Via)
+			// are ever injected unless the client explicitly sent them.
+			for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Via"} {
+				if _, ok := pr.In.Header[h]; !ok {
+					delete(pr.Out.Header, h)
+				}
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			st.status = resp.StatusCode
-			st.respCT = resp.Header.Get("Content-Type")
-			st.contentLength = resp.ContentLength
-			resp.Body = &captureReadCloser{ReadCloser: resp.Body, buf: st.respBuf}
+			st, _ := resp.Request.Context().Value(ctxKey{}).(*state)
+			if st != nil {
+				st.status = resp.StatusCode
+				st.respCT = resp.Header.Get("Content-Type")
+				st.respCE = resp.Header.Get("Content-Encoding")
+				st.contentLength = resp.ContentLength
+				resp.Body = &captureReadCloser{ReadCloser: resp.Body, buf: st.respBuf}
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			debugf("reverseproxy error: %v", err)
-			st.transportErr = err.Error()
+			if st, _ := r.Context().Value(ctxKey{}).(*state); st != nil {
+				st.transportErr = err.Error()
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		debugf("serveOne request %s %s", r.Method, r.URL.Path)
-		r = r.WithContext(ctx)
+		debugf("serveConn request %s %s", r.Method, r.URL.Path)
+		st := &state{start: time.Now(), respBuf: &cappedBuffer{max: p.cfg.MaxBody}}
+		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, st))
 		sw := &statusWriter{ResponseWriter: w}
 		rp.ServeHTTP(sw, r)
-		debugf("serveOne done status=%d err=%s", st.status, st.transportErr)
+		debugf("serveConn done status=%d err=%s", st.status, st.transportErr)
 		if st.status == 0 {
 			st.status = sw.status
 		}
@@ -261,33 +347,42 @@ func (p *Proxy) serveOne(conn net.Conn, scheme, target string) {
 		if !IsLLM(host, r.URL.Path, p.cfg.Hosts) {
 			return
 		}
-		reqParsed := ParseBody(st.reqData, st.reqCT)
-		respParsed := ParseBody(st.respBuf.buf.Bytes(), st.respCT)
+		var rawReq []byte
+		if st.reqBuf != nil {
+			rawReq = st.reqBuf.buf.Bytes()
+		}
+		reqBytes := decodeBody(rawReq, st.reqCE)
+		respBytes := decodeBody(st.respBuf.buf.Bytes(), st.respCE)
+		reqParsed := ParseBody(reqBytes, st.reqCT)
+		respParsed := ParseBody(respBytes, st.respCT)
 		model := respParsed.Model
 		if model == "" {
 			model = reqParsed.Model
 		}
 		rec := Record{
-			TS:           time.Now().UTC().Format(time.RFC3339Nano),
-			Client:       DetectClient(st.userAgent, p.cfg.Client),
-			Model:        model,
-			Endpoint:     scheme + "://" + host + r.URL.Path,
-			Host:         host,
-			Path:         r.URL.Path,
-			StatusCode:   st.status,
-			LatencyMs:    float64(time.Since(st.start).Microseconds()) / 1000.0,
-			PromptTokens: respParsed.Usage.Prompt,
+			TS:               time.Now().UTC().Format(time.RFC3339Nano),
+			Client:           DetectClient(st.userAgent, p.cfg.Client),
+			Model:            model,
+			Endpoint:         scheme + "://" + host + r.URL.Path,
+			Host:             host,
+			Path:             r.URL.Path,
+			StatusCode:       st.status,
+			LatencyMs:        float64(time.Since(st.start).Microseconds()) / 1000.0,
+			PromptTokens:     respParsed.Usage.Prompt,
 			CompletionTokens: respParsed.Usage.Completion,
 			CacheReadTokens:  respParsed.Usage.CacheRead,
 			CacheWriteTokens: respParsed.Usage.CacheWrite,
-			TotalTokens:  respParsed.Usage.Total,
-			CostUSD:      EstimateCost(model, respParsed.Usage),
-			RequestJSON:  Redact(string(st.reqData)),
-			ResponseJSON: Redact(st.respBuf.buf.String()),
-			Error:        st.transportErr,
+			TotalTokens:      respParsed.Usage.Total,
+			CostUSD:          EstimateCost(model, respParsed.Usage),
+			RequestJSON:      Redact(string(reqBytes)),
+			ResponseJSON:     Redact(string(respBytes)),
+			Error:            st.transportErr,
 		}
 		p.writer.Put(rec)
 	})
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{
+		Handler:     handler,
+		IdleTimeout: 90 * time.Second,
+	}
 	_ = srv.Serve(&singleConnListener{conn: conn})
 }

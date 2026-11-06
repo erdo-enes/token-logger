@@ -21,4 +21,4 @@ max_queue = 1000
 client_name = ""
 redact_secrets = true
 max_body_bytes = 2000000
-hosts = ["api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "openrouter.ai", "api.deepseek.com", "api.x.ai", "api.mistral.ai", "api.groq.com"]
+hosts = ["api.anthropic.com", "claude.ai", "api.openai.com", "chatgpt.com", "generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com", "autopush-cloudcode-pa.googleapis.com", "api.githubcopilot.com", "copilot-proxy.githubusercontent.com", "openrouter.ai", "api.deepseek.com", "api.x.ai", "api.mistral.ai", "api.groq.com"]

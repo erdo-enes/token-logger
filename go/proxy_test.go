@@ -31,8 +31,11 @@ func TestProxyEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upstreamLn.Close()
+	var capturedHeaders http.Header
+	var capturedBody []byte
 	go http.Serve(upstreamLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
+		capturedHeaders = r.Header.Clone()
+		capturedBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"model":"claude-sonnet-4-5","usage":{"input_tokens":10,"output_tokens":5}}`)
 	}))
@@ -68,12 +71,20 @@ func TestProxyEndToEnd(t *testing.T) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			Proxy:           http.ProxyURL(proxyURL),
-			TLSClientConfig: &tls.Config{RootCAs: pool},
+			Proxy:              http.ProxyURL(proxyURL),
+			DisableCompression: true,
+			TLSClientConfig:    &tls.Config{RootCAs: pool},
 		},
 	}
-	resp, err := client.Post("https://"+upstreamAddr+"/v1/messages", "application/json",
-		strings.NewReader(`{"model":"claude-sonnet-4-5","messages":[]}`))
+	reqPayload := `{"model":"claude-sonnet-4-5","messages":[]}`
+	req, err := http.NewRequest("POST", "https://"+upstreamAddr+"/v1/messages", strings.NewReader(reqPayload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-supersecret-oauth-token")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +92,17 @@ func TestProxyEndToEnd(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), "claude-sonnet") {
 		t.Fatalf("bad resp %d %s", resp.StatusCode, body)
+	}
+	for _, forbidden := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Via", "Accept-Encoding"} {
+		if v := capturedHeaders.Get(forbidden); v != "" {
+			t.Fatalf("proxy leaked header %s: %s", forbidden, v)
+		}
+	}
+	if string(capturedBody) != reqPayload {
+		t.Fatalf("proxy modified request body: %s", capturedBody)
+	}
+	if capturedHeaders.Get("Authorization") != "Bearer sk-ant-oat01-supersecret-oauth-token" {
+		t.Fatalf("proxy modified Authorization header: %s", capturedHeaders.Get("Authorization"))
 	}
 	// writer is async; wait for the record to land, then close to flush
 	var data []byte
@@ -102,6 +124,111 @@ func TestProxyEndToEnd(t *testing.T) {
 	}
 	if rec.Model != "claude-sonnet-4-5" || rec.TotalTokens == nil || *rec.TotalTokens != 15 {
 		t.Fatalf("bad record: %+v", rec)
+	}
+}
+
+func TestProxyAntigravitySubscription(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := LoadOrCreateCA(filepath.Join(dir, "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamTLS, err := ca.ServerTLSConfig("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamLn, err := tls.Listen("tcp", "127.0.0.1:0", upstreamTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamLn.Close()
+
+	var capturedHeaders http.Header
+	var capturedBody []byte
+	go http.Serve(upstreamLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = r.Header.Clone()
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"response\":{\"modelVersion\":\"gemini-4-argon\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"PONG\"}]}}],\"usageMetadata\":{\"promptTokenCount\":6939,\"candidatesTokenCount\":6,\"cachedContentTokenCount\":80,\"totalTokenCount\":6945}}}\n\n")
+	}))
+	upstreamAddr := upstreamLn.Addr().String()
+
+	cfg := DefaultConfig()
+	cfg.ConfDir = filepath.Join(dir, "ca")
+	cfg.JSONLPath = filepath.Join(dir, "calls.jsonl")
+	cfg.UpstreamVerify = false
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := ln.Addr().String()
+	cfg.Addr = proxyAddr
+	writer, err := NewWriter(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	proxy := NewProxy(cfg, ca, writer)
+	go proxy.ServeListener(ln)
+
+	pool := x509.NewCertPool()
+	caPEM, _ := os.ReadFile(filepath.Join(dir, "ca", "ca.pem"))
+	pool.AppendCertsFromPEM(caPEM)
+	proxyURL, _ := url.Parse("http://" + proxyAddr)
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			Proxy:              http.ProxyURL(proxyURL),
+			DisableCompression: true,
+			TLSClientConfig:    &tls.Config{RootCAs: pool},
+		},
+	}
+
+	agyPayload := `{"model":"models/gemini-4-argon","request":{"contents":[{"role":"user","parts":[{"text":"reply with just the word PONG"}]}]}}`
+	req, _ := http.NewRequest("POST", "https://"+upstreamAddr+"/v1internal:streamGenerateContent?alt=sse", strings.NewReader(agyPayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "antigravity-cli/2.0 (darwin; arm64)")
+	req.Header.Set("Authorization", "Bearer ya29.a0AfH6SMB_secret_google_oauth_token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Verify 0% modification of headers or body sent to Google
+	for _, forbidden := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Via", "Accept-Encoding"} {
+		if v := capturedHeaders.Get(forbidden); v != "" {
+			t.Fatalf("proxy leaked header %s: %s", forbidden, v)
+		}
+	}
+	if string(capturedBody) != agyPayload {
+		t.Fatalf("proxy modified agy body: %s", capturedBody)
+	}
+	if capturedHeaders.Get("Authorization") != "Bearer ya29.a0AfH6SMB_secret_google_oauth_token" {
+		t.Fatalf("proxy modified Authorization: %s", capturedHeaders.Get("Authorization"))
+	}
+
+	var data []byte
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		data, _ = os.ReadFile(cfg.JSONLPath)
+		if len(data) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	writer.Close()
+	data, err = os.ReadFile(cfg.JSONLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("jsonl parse: %v\n%s", err, data)
+	}
+	if rec.Client != "antigravity" || rec.Model != "gemini-4-argon" || *rec.PromptTokens != 6939 || *rec.CompletionTokens != 6 || *rec.CacheReadTokens != 80 || *rec.TotalTokens != 6945 {
+		t.Fatalf("unexpected agy record: %+v", rec)
 	}
 }
 
