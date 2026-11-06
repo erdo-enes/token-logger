@@ -1,6 +1,27 @@
 # Token Logger — Universal LLM Logging Proxy
 
-Lightweight HTTPS MITM proxy that records LLM API calls from any CLI coding agent (Claude Code, OpenCode, Codex, Aider, Cursor, …) to local SQLite and optionally Fluent Bit. Runs as a background service, zero impact on the CLI when it is down or slow.
+Two implementations of the same proxy, pick per your constraints:
+
+| | **Go (`go/`, recommended)** | Python (root `src/`) |
+|---|---|---|
+| Binary / install | **7.5 MB single static exe**, `CGO_ENABLED=0`, no runtime | venv + `cryptography` wheel |
+| Idle memory | **~5 MB RSS** | ~20 MB RSS |
+| Per-request overhead | **<0.5 ms** (goroutine + `httputil.ReverseProxy`) | ~1–3 ms (thread + `http.client`) |
+| Storage | JSONL (`data/calls.jsonl`) + Fluent Bit UDP, stdlib only | SQLite WAL + Fluent Bit UDP, stdlib only |
+| SQLite query | `python tools/jsonl2sqlite.py data/calls.jsonl` (on demand) | built-in (`query.py`) |
+
+Go has **zero external dependencies** (`go.mod` has no `require`s) — stdlib TLS/X.509, MessagePack encoder, and extract logic are all hand-rolled. Python version is kept as a fallback/reference and for SQLite-native querying.
+
+Both record LLM API calls from any CLI coding agent (Claude Code, OpenCode, Codex, Aider, Cursor, …), run as background services, and are fail-open: if the logger is down/slow, the CLI is unaffected.
+
+## Go quick start (recommended)
+
+```powershell
+cd go; .\build.ps1; Copy-Item config.example.json config.json
+.\bin\token-logger.exe
+```
+
+Same CA-trust + `HTTPS_PROXY=http://127.0.0.1:8080` setup as below. Logs go to `data/calls.jsonl` (one JSON object per line, same fields as the SQLite schema); import to SQLite on demand with `python ..\tools\jsonl2sqlite.py ..\data\calls.jsonl`. Service install: `go\deploy\install-windows.ps1` (NSSM/`sc.exe`, single exe) or `go\deploy\token-logger-go.service` (systemd).
 
 ## Architecture
 

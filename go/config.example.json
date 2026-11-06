@@ -1,0 +1,14 @@
+{
+  "addr": "127.0.0.1:8080",
+  "confdir": "data/mitmproxy",
+  "jsonl_path": "data/calls.jsonl",
+  "client_name": "",
+  "max_body_bytes": 2000000,
+  "upstream_verify": true,
+  "fb_enabled": false,
+  "fb_host": "127.0.0.1",
+  "fb_port": 24225,
+  "fb_tag": "token_logger.calls",
+  "fb_format": "json",
+  "hosts": ["api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "openrouter.ai", "api.deepseek.com", "api.x.ai", "api.mistral.ai", "api.groq.com"]
+}

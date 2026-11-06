@@ -1,0 +1,28 @@
+[Unit]
+Description=Token Logger (Go) LLM proxy
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=token-logger
+Group=token-logger
+WorkingDirectory=/opt/token-logger
+ExecStart=/opt/token-logger/go/bin/token-logger /opt/token-logger/go/config.json
+Restart=on-failure
+RestartSec=1
+StartLimitIntervalSec=60
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/token-logger
+Environment="TOKEN_LOGGER_JSONL=/var/lib/token-logger/calls.jsonl"
+Environment="TOKEN_LOGGER_CONFDIR=/var/lib/token-logger/mitmproxy"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
